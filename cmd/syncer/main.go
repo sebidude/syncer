@@ -1,11 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 
@@ -78,7 +82,33 @@ func main() {
 	router.DELETE(svc.BasePath+"/:filename", svc.handleDelete)
 	router.POST(svc.BasePath, svc.handleSync)
 	router.StaticFS(svc.BasePath, gin.Dir(svc.LocalPath, true))
-	router.Run(svc.ListenAddress)
+
+	srv := &http.Server{
+		Addr:    svc.ListenAddress,
+		Handler: router,
+	}
+
+	go func() {
+		// service connections
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %s\n", err)
+		}
+	}()
+
+	quit := make(chan os.Signal)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server ...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatal("Server Shutdown:", err)
+	}
+
+	<-ctx.Done()
+	log.Println("Shutdown")
+
 }
 
 func (svc *Syncer) Init() error {
