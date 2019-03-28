@@ -96,7 +96,7 @@ func (svc *Syncer) Init() error {
 	}
 
 	client, err := minio.New(
-		svc.BucketLocation+"."+svc.BucketURL,
+		svc.BucketURL,
 		svc.BucketKey,
 		svc.BucketSecret,
 		true)
@@ -173,7 +173,7 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 	if len(svc.BucketPath) > 0 {
 		dirname = svc.BucketPath + "/"
 	}
-	count, err := svc.Client.PutObject(svc.BucketName, dirname+filename, c.Request.Body, -1, minio.PutObjectOptions{
+	count, err := svc.Client.PutObject(svc.BucketName, dirname+filename, c.Request.Body, c.Request.ContentLength, minio.PutObjectOptions{
 		ContentType: c.ContentType(),
 	})
 	if err != nil {
@@ -182,6 +182,7 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 	}
 
 	if count != c.Request.ContentLength {
+		log.Printf("Written bytes are not equal: read: %d wrote: %d", count, c.Request.ContentLength)
 		c.String(500, "Error in file transmission")
 		return
 	}
