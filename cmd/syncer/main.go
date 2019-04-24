@@ -276,7 +276,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 	if len(svc.BucketPath) > 0 {
 		bucketdirname = svc.BucketPath + "/"
 	}
-	log.WithField("component", "local").Infof("removing file from bucket: %s", filename)
+	log.WithField("component", "remote").Infof("removing file from bucket: %s", filename)
 	err = svc.Client.RemoveObject(svc.BucketName, bucketdirname+filename)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to remove file from bucket %s: %s", bucketdirname+filename, err.Error())
