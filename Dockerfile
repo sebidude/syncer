@@ -12,5 +12,5 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 COPY --from=builder --chown=10001 /data /data
 COPY build/linux/syncer /syncer
 
-USER ruler
+USER syncer
 ENTRYPOINT ["/syncer"]
