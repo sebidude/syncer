@@ -13,6 +13,7 @@ import (
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 
+	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/gin-gonic/gin"
 	minio "github.com/minio/minio-go"
 	log "github.com/sirupsen/logrus"
@@ -57,9 +58,15 @@ func main() {
 	app.Flag("bucketlocation", "Location of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
 	app.Flag("bucketpath", "path inside the bucket").Default("").OverrideDefaultFromEnvar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
 
-	log.Printf("appversion: %s", appversion)
-	log.Printf("gitcommit:  %s", gitcommit)
-	log.Printf("buildtime:  %s", buildtime)
+	log.SetFormatter(&nested.Formatter{
+		HideKeys:        true,
+		FieldsOrder:     []string{"component", "category"},
+		TimestampFormat: "2006-01-02 15:04:05.999",
+	})
+
+	log.WithField("component", "main").Infof("appversion: %s", appversion)
+	log.WithField("component", "main").Infof("gitcommit:  %s", gitcommit)
+	log.WithField("component", "main").Infof("buildtime:  %s", buildtime)
 
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 	err := svc.Init()
@@ -76,7 +83,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
-	router.Use(gin.Logger())
+	router.Use(GinLogger())
 
 	router.PUT(svc.BasePath+"/:filename", svc.handleUpload)
 	router.DELETE(svc.BasePath+"/:filename", svc.handleDelete)
@@ -157,30 +164,28 @@ func (svc *Syncer) SyncFromBucket() error {
 	objectCh := svc.Client.ListObjects(svc.BucketName, svc.BucketPath, isRecursive, doneCh)
 
 	for object := range objectCh {
-		log.Debugf("%#v", object)
+		log.WithField("component", "remote").Debugf("object: %#v", object)
 		if object.Err != nil {
-			fmt.Println(object.Err)
 			return object.Err
 		}
 
 		// this is a trick to check if the object is a directory like thingy.
 		if object.Size == 0 || strings.HasSuffix(object.Key, "/") {
 			dirname = filepath.Dir(object.Key)
-			log.Infof("creating folder %s", dirname)
+			log.WithField("component", "local").Infof("creating folder %s", dirname)
 			err := os.MkdirAll(svc.LocalPath+"/"+dirname, 0755)
 			if err != nil {
 				return fmt.Errorf("Failed to create folder %s: %s", dirname, err.Error())
 			}
 			continue
 		}
-		log.Infof("downloading file %s", object.Key)
+		log.WithField("component", "sync").Infof("downloading file %s", object.Key)
 		err := svc.Client.FGetObject(svc.BucketName, object.Key, svc.LocalPath+"/"+object.Key, minio.GetObjectOptions{})
 		if err != nil {
 			return fmt.Errorf("Failed to download object %s: %s", object.Key, err.Error())
 		}
 	}
 
-	//svc.Client.ListObjects(bucketName string, objectPrefix string, recursive bool, doneCh <-chan struct{})
 	return nil
 }
 
@@ -208,12 +213,14 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		ContentType: c.ContentType(),
 	})
 	if err != nil {
-		c.String(500, "Failed to save file %s: %s", dirname+filename, err.Error())
+		msg := fmt.Sprintf("Failed to save file %s: %s", dirname+filename, err.Error())
+		log.WithField("component", "remote").Error(msg)
+		c.String(500, msg)
 		return
 	}
 
 	if count != c.Request.ContentLength {
-		log.Printf("Written bytes are not equal: read: %d wrote: %d", count, c.Request.ContentLength)
+		log.WithField("component", "remote").Errorf("Written bytes are not equal: read: %d wrote: %d", count, c.Request.ContentLength)
 		c.String(500, "Error in file transmission")
 		return
 	}
@@ -226,6 +233,7 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 
 	err = svc.triggerWebhook()
 	if err != nil {
+
 		c.String(http.StatusInternalServerError, "Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
 		return
 	}
@@ -235,7 +243,9 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 func (svc *Syncer) handleDelete(c *gin.Context) {
 	filename := c.Param("filename")
 	if strings.Contains(filename, "../") {
-		c.String(http.StatusForbidden, "This is not allowed. Go away.")
+		msg := fmt.Sprintf("This is not allowed. Go away.")
+		log.WithField("component", "local").Error(msg)
+		c.String(http.StatusForbidden, msg)
 		return
 	}
 
@@ -248,12 +258,17 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 
 	_, err := os.Stat(localdirname + "/" + filename)
 	if err != nil && os.IsNotExist(err) {
-		c.String(404, "The file %s does not exist.", filename)
+		msg := fmt.Sprintf("The file %s does not exist.", filename)
+		log.WithField("component", "local").Error(msg)
+		c.String(404, msg)
 		return
 	}
+	log.WithField("component", "local").Infof("removing local file: %s", filename)
 	err = os.Remove(localdirname + "/" + filename)
 	if err != nil {
-		c.String(http.StatusInternalServerError, "Failed delete file %s: %s", filename, err.Error())
+		msg := fmt.Sprintf("Failed delete file %s: %s", filename, err.Error())
+		log.WithField("component", "local").Error(msg)
+		c.String(http.StatusInternalServerError, msg)
 		return
 	}
 
@@ -261,10 +276,11 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 	if len(svc.BucketPath) > 0 {
 		bucketdirname = svc.BucketPath + "/"
 	}
-
+	log.WithField("component", "local").Infof("removing file from bucket: %s", filename)
 	err = svc.Client.RemoveObject(svc.BucketName, bucketdirname+filename)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to remove file from bucket %s: %s", bucketdirname+filename, err.Error())
+		log.WithField("component", "remote").Error(msg)
 		c.String(http.StatusInternalServerError, msg)
 		return
 	}
@@ -278,13 +294,37 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 
 func (svc *Syncer) triggerWebhook() error {
 	if len(svc.WebhookURL) > 0 {
-		log.Infof("Triggering webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
+		log.WithField("component", "trigger").Infof("Triggering webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
 		c := &http.Client{}
 		r, _ := http.NewRequest(svc.WebhookMethod, svc.WebhookURL, nil)
 		_, err := c.Do(r)
 		if err != nil {
+			msg := fmt.Sprintf("Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
+			log.WithField("component", "trigger").Error(msg)
 			return err
 		}
 	}
 	return nil
+}
+
+func GinLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		t := time.Now()
+		c.Next()
+
+		// after request
+		latency := time.Since(t)
+
+		// access the status we are sending
+		status := c.Writer.Status()
+		logstring := fmt.Sprintf("%s - %d - %s - %s (%s)",
+			c.Request.RemoteAddr,
+			status,
+			c.Request.Method,
+			c.Request.RequestURI,
+			latency)
+
+		log.WithField("component", "gin").Infoln(logstring)
+
+	}
 }
