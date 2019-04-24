@@ -61,7 +61,7 @@ func main() {
 	log.SetFormatter(&nested.Formatter{
 		HideKeys:        true,
 		FieldsOrder:     []string{"component", "category"},
-		TimestampFormat: "2006-01-02 15:04:05.999",
+		TimestampFormat: time.RFC3339Nano,
 	})
 
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
@@ -85,8 +85,8 @@ func main() {
 	router.Use(gin.Recovery())
 	router.Use(GinLogger())
 
-	router.PUT(svc.BasePath+"/:filename", svc.handleUpload)
-	router.DELETE(svc.BasePath+"/:filename", svc.handleDelete)
+	router.PUT(svc.BasePath+"/*filename", svc.handleUpload)
+	router.DELETE(svc.BasePath+"/*filename", svc.handleDelete)
 	router.POST(svc.BasePath, svc.handleSync)
 	router.StaticFS(svc.BasePath, gin.Dir(svc.LocalPath, true))
 
@@ -206,9 +206,11 @@ func (svc *Syncer) handleSync(c *gin.Context) {
 func (svc *Syncer) handleUpload(c *gin.Context) {
 	filename := c.Param("filename")
 	dirname := ""
+	filename = strings.TrimPrefix(filename, "/")
 	if len(svc.BucketPath) > 0 {
 		dirname = svc.BucketPath + "/"
 	}
+	log.WithField("component", "remote").Infof("Uploading %s to %s", filename, dirname+filename)
 	count, err := svc.Client.PutObject(svc.BucketName, dirname+filename, c.Request.Body, c.Request.ContentLength, minio.PutObjectOptions{
 		ContentType: c.ContentType(),
 	})
@@ -264,7 +266,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		return
 	}
 	log.WithField("component", "local").Infof("removing local file: %s", filename)
-	err = os.Remove(localdirname + "/" + filename)
+	err = os.RemoveAll(localdirname + "/" + filename)
 	if err != nil {
 		msg := fmt.Sprintf("Failed delete file %s: %s", filename, err.Error())
 		log.WithField("component", "local").Error(msg)
@@ -272,11 +274,12 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		return
 	}
 
+	filename = strings.TrimPrefix(filename, "/")
 	bucketdirname := ""
 	if len(svc.BucketPath) > 0 {
 		bucketdirname = svc.BucketPath + "/"
 	}
-	log.WithField("component", "remote").Infof("removing file from bucket: %s", filename)
+	log.WithField("component", "remote").Infof("removing file from bucket: %s", bucketdirname+filename)
 	err = svc.Client.RemoveObject(svc.BucketName, bucketdirname+filename)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to remove file from bucket %s: %s", bucketdirname+filename, err.Error())
