@@ -151,19 +151,20 @@ func (svc *Syncer) Init() error {
 
 func (svc *Syncer) SyncFromBucket() error {
 	doneCh := make(chan struct{})
-
-	// Indicate to our routine to exit cleanly upon return.
 	defer close(doneCh)
 	dirname := ""
 	isRecursive := true
 	objectCh := svc.Client.ListObjects(svc.BucketName, svc.BucketPath, isRecursive, doneCh)
-	for object := range objectCh {
 
+	for object := range objectCh {
+		log.Debugf("%#v", object)
 		if object.Err != nil {
 			fmt.Println(object.Err)
 			return object.Err
 		}
-		if object.Size == 0 {
+
+		// this is a trick to check if the object is a directory like thingy.
+		if object.Size == 0 || strings.HasSuffix(object.Key, "/") {
 			dirname = filepath.Dir(object.Key)
 			log.Infof("creating folder %s", dirname)
 			err := os.MkdirAll(svc.LocalPath+"/"+dirname, 0755)
