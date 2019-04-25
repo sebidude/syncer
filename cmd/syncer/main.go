@@ -156,10 +156,44 @@ func (svc *Syncer) Init() error {
 	return nil
 }
 
+func (svc *Syncer) createFolder(objectKey string) error {
+	dirname := filepath.Dir(objectKey)
+	localpath := svc.LocalPath + "/" + dirname
+	_, err := os.Stat(localpath)
+	if err != nil && os.IsNotExist(err) {
+		log.WithField("component", "local").Debugf("creating folder %s", localpath)
+		err := os.MkdirAll(localpath, 0755)
+		if err != nil {
+			return fmt.Errorf("Failed to create folder %s: %s", dirname, err.Error())
+		}
+	}
+	return nil
+}
+
+func (svc *Syncer) getFromBucket(objectKey string) error {
+	err := svc.Client.FGetObject(svc.BucketName, objectKey, svc.LocalPath+"/"+objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return fmt.Errorf("Failed to download object %s: %s", objectKey, err.Error())
+	}
+	return nil
+}
+
+func (svc *Syncer) getObjectList(prefix string) []string {
+	doneCh := make(chan struct{})
+	defer close(doneCh)
+	isRecursive := true
+	objectCh := svc.Client.ListObjects(svc.BucketName, prefix, isRecursive, doneCh)
+	var objectlist []string
+	for object := range objectCh {
+		objectlist = append(objectlist, object.Key)
+	}
+
+	return objectlist
+}
+
 func (svc *Syncer) SyncFromBucket() error {
 	doneCh := make(chan struct{})
 	defer close(doneCh)
-	dirname := ""
 	isRecursive := true
 	objectCh := svc.Client.ListObjects(svc.BucketName, svc.BucketPath, isRecursive, doneCh)
 
@@ -169,20 +203,15 @@ func (svc *Syncer) SyncFromBucket() error {
 			return object.Err
 		}
 
-		// this is a trick to check if the object is a directory like thingy.
-		if object.Size == 0 || strings.HasSuffix(object.Key, "/") {
-			dirname = filepath.Dir(object.Key)
-			log.WithField("component", "local").Infof("creating folder %s", dirname)
-			err := os.MkdirAll(svc.LocalPath+"/"+dirname, 0755)
-			if err != nil {
-				return fmt.Errorf("Failed to create folder %s: %s", dirname, err.Error())
-			}
-			continue
-		}
-		log.WithField("component", "sync").Infof("downloading file %s", object.Key)
-		err := svc.Client.FGetObject(svc.BucketName, object.Key, svc.LocalPath+"/"+object.Key, minio.GetObjectOptions{})
+		err := svc.createFolder(object.Key)
 		if err != nil {
-			return fmt.Errorf("Failed to download object %s: %s", object.Key, err.Error())
+			log.WithField("component", "local").Error(err.Error())
+		}
+
+		log.WithField("component", "remote").Infof("get object %s", object.Key)
+		err = svc.getFromBucket(object.Key)
+		if err != nil {
+			log.WithField("component", "remote").Error(err.Error())
 		}
 	}
 
@@ -227,7 +256,8 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		return
 	}
 
-	err = svc.SyncFromBucket()
+	log.WithField("component", "remote").Infof("get object %s", dirname+filename)
+	err = svc.getFromBucket(dirname + filename)
 	if err != nil {
 		c.String(500, "Error sync back from bucket: %s", err.Error())
 		return
@@ -258,7 +288,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		localdirname = svc.LocalPath
 	}
 
-	_, err := os.Stat(localdirname + "/" + filename)
+	info, err := os.Stat(localdirname + "/" + filename)
 	if err != nil && os.IsNotExist(err) {
 		msg := fmt.Sprintf("The file %s does not exist.", filename)
 		log.WithField("component", "local").Error(msg)
@@ -279,6 +309,25 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 	if len(svc.BucketPath) > 0 {
 		bucketdirname = svc.BucketPath + "/"
 	}
+
+	if info.IsDir() {
+		// get a list of all files in the bucket with directory as prefix
+		objectlist := svc.getObjectList(bucketdirname + filename)
+		for _, o := range objectlist {
+			err = svc.Client.RemoveObject(svc.BucketName, o)
+			if err != nil {
+				msg := fmt.Sprintf("Failed to remove file from bucket %s: %s", o, err.Error())
+				log.WithField("component", "remote").Error(msg)
+				c.String(http.StatusInternalServerError, msg)
+				return
+			}
+			log.WithField("component", "remote").Infof("removed object from bucket: %s", o)
+		}
+
+		c.String(http.StatusOK, "removed %d objects from bucket", len(objectlist))
+		return
+	}
+
 	log.WithField("component", "remote").Infof("removing file from bucket: %s", bucketdirname+filename)
 	err = svc.Client.RemoveObject(svc.BucketName, bucketdirname+filename)
 	if err != nil {
