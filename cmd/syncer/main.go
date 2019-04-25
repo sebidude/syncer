@@ -16,6 +16,7 @@ import (
 	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/gin-gonic/gin"
 	minio "github.com/minio/minio-go"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -85,6 +86,12 @@ func main() {
 	router.Use(gin.Recovery())
 	router.Use(GinLogger())
 
+	health := router.Group("/admin/healthz")
+	health.GET("", func(c *gin.Context) { c.String(200, "healthy") })
+
+	metrics := router.Group("/admin/metrics")
+	metrics.GET("", prometheusHandler())
+
 	router.PUT(svc.BasePath+"/*filename", svc.handleUpload)
 	router.DELETE(svc.BasePath+"/*filename", svc.handleDelete)
 	router.GET(svc.BasePath+"/*filename", svc.handleDownload)
@@ -117,6 +124,13 @@ func main() {
 	<-ctx.Done()
 	log.Println("Shutdown")
 
+}
+
+func prometheusHandler() gin.HandlerFunc {
+	h := promhttp.Handler()
+	return func(c *gin.Context) {
+		h.ServeHTTP(c.Writer, c.Request)
+	}
 }
 
 func (svc *Syncer) Init() error {
