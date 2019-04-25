@@ -87,8 +87,9 @@ func main() {
 
 	router.PUT(svc.BasePath+"/*filename", svc.handleUpload)
 	router.DELETE(svc.BasePath+"/*filename", svc.handleDelete)
+	router.GET(svc.BasePath+"/*filename", svc.handleDownload)
 	router.POST(svc.BasePath, svc.handleSync)
-	router.StaticFS(svc.BasePath, gin.Dir(svc.LocalPath, true))
+	router.StaticFS("/objects", gin.Dir(svc.LocalPath, true))
 
 	srv := &http.Server{
 		Addr:    svc.ListenAddress,
@@ -216,6 +217,33 @@ func (svc *Syncer) SyncFromBucket() error {
 	}
 
 	return nil
+}
+
+func (svc *Syncer) handleDownload(c *gin.Context) {
+	filename := c.Param("filename")
+	filename = strings.TrimPrefix(filename, "/")
+
+	_, err := svc.Client.StatObject(svc.BucketName, filename, minio.StatObjectOptions{})
+	if err != nil {
+		log.WithField("component", "remote").Error(err.Error())
+		c.String(http.StatusNotFound, err.Error())
+		return
+	}
+
+	err = svc.createFolder(filename)
+	if err != nil {
+		log.WithField("component", "local").Error(err.Error())
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	log.WithField("component", "remote").Infof("get object %s", filename)
+	err = svc.getFromBucket(filename)
+	if err != nil {
+		log.WithField("component", "remote").Error(err.Error())
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
 }
 
 func (svc *Syncer) handleSync(c *gin.Context) {
