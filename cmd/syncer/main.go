@@ -84,7 +84,6 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
-	router.Use(GinLogger())
 
 	health := router.Group("/admin/healthz")
 	health.GET("", func(c *gin.Context) { c.String(200, "healthy") })
@@ -92,10 +91,12 @@ func main() {
 	metrics := router.Group("/admin/metrics")
 	metrics.GET("", prometheusHandler())
 
-	router.PUT(svc.BasePath+"/*filename", svc.handleUpload)
-	router.DELETE(svc.BasePath+"/*filename", svc.handleDelete)
-	router.GET(svc.BasePath+"/*filename", svc.handleDownload)
-	router.POST(svc.BasePath, svc.handleSync)
+	sync := router.Group(svc.BasePath)
+	sync.Use(GinLogger())
+	sync.PUT("/*filename", svc.handleUpload)
+	sync.DELETE("/*filename", svc.handleDelete)
+	sync.GET("/*filename", svc.handleDownload)
+	sync.POST("", svc.handleSync)
 	router.StaticFS("/objects", gin.Dir(svc.LocalPath, true))
 
 	srv := &http.Server{
