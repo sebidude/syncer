@@ -34,6 +34,9 @@ build-linux: info dep
 	go build -o build/linux/$(APPNAME)-$(VERSIONTAG)-$(GITCOMMITHASH) -a -ldflags $(LDFLAGS) $(APPSRC)
 	@cp build/linux/$(APPNAME)-$(VERSIONTAG)-$(GITCOMMITHASH) build/linux/$(APPNAME)
 
+install:
+	@cp build/linux/$(APPNAME) ${GOPATH}/bin/$(APPNAME)
+
 image: 
 	@echo Creating docker image
 	@docker build -t $(APPNAME):latest -t $(APPNAME):$(VERSIONTAG)-$(GITCOMMITHASH) .

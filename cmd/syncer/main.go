@@ -394,7 +394,7 @@ func (svc *Syncer) triggerWebhook() error {
 		r, _ := http.NewRequest(svc.WebhookMethod, svc.WebhookURL, nil)
 		_, err := c.Do(r)
 		if err != nil {
-			msg := fmt.Sprintf("Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
+			msg := fmt.Sprintf("Failed to trigger webhook: %s %s (%s)", svc.WebhookMethod, svc.WebhookURL, err.Error())
 			log.WithField("component", "trigger").Error(msg)
 			return err
 		}
