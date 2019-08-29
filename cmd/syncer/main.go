@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"syscall"
 	"time"
@@ -29,6 +30,7 @@ var (
 type Syncer struct {
 	BasePath       string
 	LocalPath      string
+	StaticMap      string
 	WebhookURL     string
 	WebhookMethod  string
 	ListenAddress  string
@@ -49,6 +51,7 @@ func main() {
 	app := kingpin.New("syncer", "Transfer files from and to S3 buckets and trigger a webhook.")
 	app.Flag("basepath", "Base path for the webapp.").Short('b').Default("/sync").OverrideDefaultFromEnvar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
 	app.Flag("storepath", "Path where files are sync to locally.").Short('s').Default("/data").OverrideDefaultFromEnvar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
+	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").OverrideDefaultFromEnvar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
 	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").OverrideDefaultFromEnvar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
 	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").OverrideDefaultFromEnvar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
 	app.Flag("listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").OverrideDefaultFromEnvar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
@@ -64,12 +67,29 @@ func main() {
 		FieldsOrder:     []string{"component", "category"},
 		TimestampFormat: time.RFC3339Nano,
 	})
-
+	log.WithField("component", "main").Infof("==== Server startup ====")
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
 	log.WithField("component", "main").Infof("gitcommit:  %s", gitcommit)
 	log.WithField("component", "main").Infof("buildtime:  %s", buildtime)
 
 	kingpin.MustParse(app.Parse(os.Args[1:]))
+
+	fields := reflect.TypeOf(*svc)
+	values := reflect.ValueOf(*svc)
+
+	num := fields.NumField()
+
+	for i := 0; i < num; i++ {
+		field := fields.Field(i)
+		value := values.Field(i)
+		//fmt.Print("Type:", field.Type, ",", field.Name, "=", value, "\n")
+		if field.Name == "BucketSecret" || field.Name == "BucketKey" {
+			log.WithField("component", "config").Infof("%s:  %v", field.Name, "******")
+			continue
+		}
+		log.WithField("component", "config").Infof("%s:  %v", field.Name, value)
+	}
+
 	err := svc.Init()
 	if err != nil {
 		log.Println(err.Error())
@@ -98,6 +118,21 @@ func main() {
 	sync.GET("/*filename", svc.handleDownload)
 	sync.POST("", svc.handleSync)
 	router.StaticFS("/objects", gin.Dir(svc.LocalPath, true))
+
+	if strings.Contains(svc.StaticMap, ":") {
+		parts := strings.SplitN(svc.StaticMap, ":", 2)
+		if len(parts) == 2 {
+			urlpath := parts[0]
+			localpath := parts[1]
+			if len(urlpath) < 1 || len(localpath) < 1 {
+				log.WithField("component", "main").Fatal("bad mapping for staticFS")
+			}
+
+			staticfs := router.StaticFS(urlpath, gin.Dir(localpath, false))
+			staticfs.Use(GinLogger())
+			log.WithField("component", "main").Infof("serving %q as staticFS from %q", urlpath, localpath)
+		}
+	}
 
 	srv := &http.Server{
 		Addr:    svc.ListenAddress,
