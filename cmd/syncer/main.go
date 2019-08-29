@@ -49,6 +49,7 @@ func main() {
 	svc := new(Syncer)
 
 	app := kingpin.New("syncer", "Transfer files from and to S3 buckets and trigger a webhook.")
+	app.Version(fmt.Sprintf("syncer %s-%s %s", appversion, gitcommit, buildtime))
 	app.Flag("basepath", "Base path for the webapp.").Short('b').Default("/sync").OverrideDefaultFromEnvar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
 	app.Flag("storepath", "Path where files are sync to locally.").Short('s').Default("/data").OverrideDefaultFromEnvar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
 	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").OverrideDefaultFromEnvar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
@@ -62,6 +63,8 @@ func main() {
 	app.Flag("bucketlocation", "Location of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
 	app.Flag("bucketpath", "path inside the bucket").Default("").OverrideDefaultFromEnvar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
 
+	kingpin.MustParse(app.Parse(os.Args[1:]))
+
 	log.SetFormatter(&nested.Formatter{
 		HideKeys:        true,
 		FieldsOrder:     []string{"component", "category"},
@@ -71,8 +74,6 @@ func main() {
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
 	log.WithField("component", "main").Infof("gitcommit:  %s", gitcommit)
 	log.WithField("component", "main").Infof("buildtime:  %s", buildtime)
-
-	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	fields := reflect.TypeOf(*svc)
 	values := reflect.ValueOf(*svc)
