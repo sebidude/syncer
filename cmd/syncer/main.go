@@ -223,6 +223,7 @@ func (svc *Syncer) createFolder(objectKey string) error {
 }
 
 func (svc *Syncer) getFromBucket(objectKey string) error {
+	log.WithField("component", "remote").Infof("storing %q to %q", objectKey, svc.LocalPath+"/"+objectKey)
 	err := svc.Client.FGetObject(svc.BucketName, objectKey, svc.LocalPath+"/"+objectKey, minio.GetObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("Failed to download object %s: %s", objectKey, err.Error())
