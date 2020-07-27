@@ -7,13 +7,13 @@ WORKDIR /build
 RUN git clone https://github.com/sebidude/syncer.git
 WORKDIR /build/syncer
 RUN make build-linux
-RUN mkdir /data && mkdir /tmp
+RUN mkdir /data 
 
 FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=builder --chown=10001 /data /data
-COPY --from=builder --chown=10001 /tmp /tmp
+COPY --from=builder --chown=10001 /data /tmp
 COPY --from=builder /build/syncer/build/linux/syncer /usr/bin/syncer
 
 USER 10001
