@@ -1,0 +1,20 @@
+FROM alpine:latest as builder
+
+RUN apk update && apk upgrade
+RUN apk add --no-cache ca-certificates git make
+RUN mkdir /build
+WORKDIR /build
+RUN git clone https://github.com/sebidude/syncer.git
+WORKDIR /build/syncer
+RUN make build-linux
+RUN mkdir /data && mkdir /tmp
+
+FROM scratch
+
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder --chown=10001 /data /data
+COPY --from=builder --chown=10001 /tmp /tmp
+COPY --from=builder /build/syncer/build/linux/syncer /usr/bin/syncer
+
+USER 10001
+ENTRYPOINT ["/usr/bin/syncer"]

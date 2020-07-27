@@ -1,10 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"reflect"
@@ -28,20 +31,21 @@ var (
 )
 
 type Syncer struct {
-	BasePath       string
-	LocalPath      string
-	StaticMap      string
-	WebhookURL     string
-	WebhookMethod  string
-	ListenAddress  string
-	BucketName     string
-	BucketURL      string
-	BucketKey      string
-	BucketSecret   string
-	BucketLocation string
-	BucketPath     string
-	UseS3          bool
-	Client         *minio.Client
+	BasePath         string
+	LocalPath        string
+	StaticMap        string
+	WebhookURL       string
+	WebhookMethod    string
+	PreSyncCmdString string
+	ListenAddress    string
+	BucketName       string
+	BucketURL        string
+	BucketKey        string
+	BucketSecret     string
+	BucketLocation   string
+	BucketPath       string
+	UseS3            bool
+	Client           *minio.Client
 }
 
 func main() {
@@ -55,6 +59,7 @@ func main() {
 	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").OverrideDefaultFromEnvar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
 	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").OverrideDefaultFromEnvar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
 	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").OverrideDefaultFromEnvar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
+	app.Flag("presynccmd", "Command to be executed before the files are uploaded").Short('p').Default("").OverrideDefaultFromEnvar("SYNCER_PRESYNCCMD").StringVar(&svc.PreSyncCmdString)
 	app.Flag("listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").OverrideDefaultFromEnvar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
 	app.Flag("bucketname", "Name of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETNAME").StringVar(&svc.BucketName)
 	app.Flag("bucketurl", "URL of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETURL").StringVar(&svc.BucketURL)
@@ -319,8 +324,67 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 	if len(svc.BucketPath) > 0 {
 		dirname = svc.BucketPath + "/"
 	}
+
+	filecontent, err := ioutil.ReadAll(c.Request.Body)
+	if err != nil {
+		msg := fmt.Sprintf("Failed to read bytes from body: %s: %s", dirname+filename, err.Error())
+		log.WithField("component", "local").Error(msg)
+		c.String(500, msg)
+		return
+	}
+	r := bytes.NewReader(filecontent)
+
+	if len(svc.PreSyncCmdString) > 0 {
+		// we save the file temporarily
+		tempfile, err := ioutil.TempFile("", filename+"-*")
+		defer os.Remove(tempfile.Name())
+		if err != nil {
+			msg := fmt.Errorf("Failed to create temp file %s: %s", dirname+filename, err.Error())
+			log.WithField("component", "local").Error(msg.Error())
+			c.String(500, msg.Error())
+			c.Abort()
+			return
+		}
+
+		_, err = tempfile.Write(filecontent)
+		if err != nil {
+			msg := fmt.Errorf("Failed to write content to temp file %s: %s", tempfile.Name(), err.Error())
+			log.WithField("component", "local").Error(msg.Error())
+			c.String(500, msg.Error())
+			c.Abort()
+			return
+		}
+		log.WithField("component", "presynccmd").Infof("Running presynccmd %s %s", svc.PreSyncCmdString, tempfile.Name())
+
+		parts := strings.Split(svc.PreSyncCmdString, " ")
+		cmd := exec.Command(parts[0], parts[1:]...)
+
+		cmd.Args = append(cmd.Args, tempfile.Name())
+		cmdOutput, err := cmd.Output()
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); !ok {
+				msg := fmt.Errorf("Presynccmd failed: %s: %s", tempfile.Name(), err.Error())
+				log.WithField("component", "presynccmd").Error(msg.Error())
+				c.String(500, msg.Error())
+				c.Abort()
+				return
+			}
+			msg := fmt.Errorf("Presynccmd failed: %s: %s %s", tempfile.Name(), err.Error(), string(err.(*exec.ExitError).Stderr))
+			log.WithField("component", "presynccmd").Error(msg.Error())
+			c.String(412, msg.Error())
+			c.Abort()
+			return
+		}
+		for _, line := range strings.Split(string(cmdOutput), "\n") {
+			if len(line) > 0 {
+				log.WithField("component", "presynccmd").Infof("Result %s: %s", tempfile.Name(), line)
+			}
+		}
+
+	}
+
 	log.WithField("component", "remote").Infof("Uploading %s to %s", filename, dirname+filename)
-	count, err := svc.Client.PutObject(svc.BucketName, dirname+filename, c.Request.Body, c.Request.ContentLength, minio.PutObjectOptions{
+	count, err := svc.Client.PutObject(svc.BucketName, dirname+filename, r, c.Request.ContentLength, minio.PutObjectOptions{
 		ContentType: c.ContentType(),
 	})
 	if err != nil {
