@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -28,24 +30,29 @@ var (
 	buildtime  string
 	gitcommit  string
 	appversion string
+	logoutput  io.Writer
 )
 
 type Syncer struct {
-	BasePath         string
-	LocalPath        string
-	StaticMap        string
-	WebhookURL       string
-	WebhookMethod    string
-	PreSyncCmdString string
-	ListenAddress    string
-	BucketName       string
-	BucketURL        string
-	BucketKey        string
-	BucketSecret     string
-	BucketLocation   string
-	BucketPath       string
-	UseS3            bool
-	Client           *minio.Client
+	BasePath           string
+	LocalPath          string
+	StaticMap          string
+	WebhookURL         string
+	WebhookMethod      string
+	PreSyncCmdString   string
+	ListenAddress      string
+	BucketName         string
+	BucketURL          string
+	BucketKey          string
+	BucketSecret       string
+	BucketLocation     string
+	BucketPath         string
+	Lock               sync.Mutex
+	UseS3              bool
+	PullIntervalString string
+	RunPeriodicSync    bool
+	TempDir            string
+	Client             *minio.Client
 }
 
 func main() {
@@ -54,19 +61,21 @@ func main() {
 
 	app := kingpin.New("syncer", "Transfer files from and to S3 buckets and trigger a webhook.")
 	app.Version(fmt.Sprintf("syncer %s-%s %s", appversion, gitcommit, buildtime))
-	app.Flag("basepath", "Base path for the webapp.").Short('b').Default("/sync").OverrideDefaultFromEnvar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
-	app.Flag("storepath", "Path where files are sync to locally.").Short('s').Default("/data").OverrideDefaultFromEnvar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
-	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").OverrideDefaultFromEnvar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
-	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").OverrideDefaultFromEnvar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
-	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").OverrideDefaultFromEnvar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
-	app.Flag("presynccmd", "Command to be executed before the files are uploaded").Short('p').Default("").OverrideDefaultFromEnvar("SYNCER_PRESYNCCMD").StringVar(&svc.PreSyncCmdString)
-	app.Flag("listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").OverrideDefaultFromEnvar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
-	app.Flag("bucketname", "Name of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETNAME").StringVar(&svc.BucketName)
-	app.Flag("bucketurl", "URL of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETURL").StringVar(&svc.BucketURL)
-	app.Flag("bucketkey", "Access key of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETKEY").StringVar(&svc.BucketKey)
-	app.Flag("bucketsecret", "Secret of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETSECRET").StringVar(&svc.BucketSecret)
-	app.Flag("bucketlocation", "Location of the S3 bucket").Default("-").OverrideDefaultFromEnvar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
-	app.Flag("bucketpath", "path inside the bucket").Default("").OverrideDefaultFromEnvar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
+	app.Flag("basepath", "Base path for the webapp.").Short('b').Default("/sync").Envar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
+	app.Flag("storepath", "Path where files are sync to locally.").Short('s').Default("/data").Envar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
+	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").Envar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
+	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").Envar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
+	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").Envar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
+	app.Flag("presynccmd", "Command to be executed before the files are uploaded").Short('p').Default("").Envar("SYNCER_PRESYNCCMD").StringVar(&svc.PreSyncCmdString)
+	app.Flag("listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").Envar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
+	app.Flag("bucketname", "Name of the S3 bucket").Default("-").Envar("SYNCER_BUCKETNAME").StringVar(&svc.BucketName)
+	app.Flag("bucketurl", "URL of the S3 bucket").Default("-").Envar("SYNCER_BUCKETURL").StringVar(&svc.BucketURL)
+	app.Flag("bucketkey", "Access key of the S3 bucket").Default("-").Envar("SYNCER_BUCKETKEY").StringVar(&svc.BucketKey)
+	app.Flag("bucketsecret", "Secret of the S3 bucket").Default("-").Envar("SYNCER_BUCKETSECRET").StringVar(&svc.BucketSecret)
+	app.Flag("bucketlocation", "Location of the S3 bucket").Default("-").Envar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
+	app.Flag("bucketpath", "path inside the bucket").Default("").Envar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
+	app.Flag("pullinterval", "Interval in seconds to check and sync updates on the s3 endpoint").Default("30s").Envar("SYNCER_PULLINTERVAL").StringVar(&svc.PullIntervalString)
+	app.Flag("tempdir", "Temp dir where files are store for the presynccmd to run on.").Default("/tmp").Envar("SYNCER_TEMPDIR").StringVar(&svc.TempDir)
 
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
@@ -156,6 +165,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	log.Println("Shutting down server ...")
+	svc.RunPeriodicSync = false
 
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
@@ -210,7 +220,36 @@ func (svc *Syncer) Init() error {
 		}
 	}
 
+	if len(svc.PullIntervalString) > 0 {
+		interval, err := time.ParseDuration(svc.PullIntervalString)
+		if err != nil {
+			return err
+		}
+		svc.RunPeriodicSync = true
+		go svc.PrediodicSync(interval)
+	}
+
 	return nil
+}
+
+func (svc *Syncer) PrediodicSync(interval time.Duration) {
+	lastSync := time.Now()
+	for {
+		if time.Since(lastSync) > interval {
+			log.WithField("component", "periodicsync").Infof("sync from bucket")
+			log.SetLevel(log.ErrorLevel)
+			if err := svc.SyncFromBucket(); err != nil {
+				log.WithField("component", "periodicsync").Errorf("failed to sync from bucket: %s", err.Error())
+			}
+			log.SetLevel(log.InfoLevel)
+			lastSync = time.Now()
+		}
+		time.Sleep(500 * time.Millisecond)
+		if !svc.RunPeriodicSync {
+			return
+		}
+	}
+
 }
 
 func (svc *Syncer) createFolder(objectKey string) error {
@@ -229,6 +268,10 @@ func (svc *Syncer) createFolder(objectKey string) error {
 
 func (svc *Syncer) getFromBucket(objectKey string) error {
 	log.WithField("component", "remote").Infof("storing %q to %q", objectKey, svc.LocalPath+"/"+objectKey)
+	if err := svc.createFolder(objectKey); err != nil {
+		return err
+	}
+
 	err := svc.Client.FGetObject(svc.BucketName, objectKey, svc.LocalPath+"/"+objectKey, minio.GetObjectOptions{})
 	if err != nil {
 		return fmt.Errorf("Failed to download object %s: %s", objectKey, err.Error())
@@ -250,6 +293,9 @@ func (svc *Syncer) getObjectList(prefix string) []string {
 }
 
 func (svc *Syncer) SyncFromBucket() error {
+	svc.Lock.Lock()
+	defer svc.Lock.Unlock()
+
 	doneCh := make(chan struct{})
 	defer close(doneCh)
 	isRecursive := true
@@ -336,7 +382,17 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 
 	if len(svc.PreSyncCmdString) > 0 {
 		// we save the file temporarily
-		tempfile, err := ioutil.TempFile("", filename+"-*")
+		tempdir := filepath.Dir(filename)
+		if tempdir != "." {
+			if err := os.MkdirAll(svc.TempDir+"/"+tempdir, 0777); err != nil {
+				msg := fmt.Errorf("failed to create tmpdir: %s", err.Error())
+				log.WithField("component", "local").Errorf(msg.Error())
+				c.String(500, msg.Error())
+				c.Abort()
+				return
+			}
+		}
+		tempfile, err := ioutil.TempFile(svc.TempDir+"/"+tempdir, filepath.Base(filename)+"-*")
 		defer os.Remove(tempfile.Name())
 		if err != nil {
 			msg := fmt.Errorf("Failed to create temp file %s: %s", dirname+filename, err.Error())
@@ -400,7 +456,7 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		return
 	}
 
-	log.WithField("component", "remote").Infof("get object %s", dirname+filename)
+	log.WithField("component", "remote").Debugf("get object %s", dirname+filename)
 	err = svc.getFromBucket(dirname + filename)
 	if err != nil {
 		c.String(500, "Error sync back from bucket: %s", err.Error())
