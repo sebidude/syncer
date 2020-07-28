@@ -52,6 +52,7 @@ type Syncer struct {
 	PullIntervalString string
 	RunPeriodicSync    bool
 	TempDir            string
+	LogLevel           string
 	Client             *minio.Client
 }
 
@@ -76,7 +77,7 @@ func main() {
 	app.Flag("bucketpath", "path inside the bucket").Default("").Envar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
 	app.Flag("pullinterval", "Interval in seconds to check and sync updates on the s3 endpoint").Default("30s").Envar("SYNCER_PULLINTERVAL").StringVar(&svc.PullIntervalString)
 	app.Flag("tempdir", "Temp dir where files are store for the presynccmd to run on.").Default("/tmp").Envar("SYNCER_TEMPDIR").StringVar(&svc.TempDir)
-
+	app.Flag("loglevel", "Log level (info,warning,debug,error,trace").Default("info").Envar("SYNCER_LOGLEVEL").StringVar(&svc.LogLevel)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	log.SetFormatter(&nested.Formatter{
@@ -84,6 +85,7 @@ func main() {
 		FieldsOrder:     []string{"component", "category"},
 		TimestampFormat: time.RFC3339Nano,
 	})
+
 	log.WithField("component", "main").Infof("==== Server startup ====")
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
 	log.WithField("component", "main").Infof("gitcommit:  %s", gitcommit)
@@ -110,6 +112,19 @@ func main() {
 		log.Println(err.Error())
 		os.Exit(1)
 	}
+	switch svc.LogLevel {
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	case "warning":
+		log.SetLevel(log.WarnLevel)
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "trace":
+		log.SetLevel(log.TraceLevel)
+	}
+
 	if err := svc.SyncFromBucket(); err != nil {
 		log.Println(err.Error())
 		os.Exit(1)
@@ -234,14 +249,18 @@ func (svc *Syncer) Init() error {
 
 func (svc *Syncer) PrediodicSync(interval time.Duration) {
 	lastSync := time.Now()
+	loglevel := log.GetLevel()
 	for {
 		if time.Since(lastSync) > interval {
 			log.WithField("component", "periodicsync").Infof("sync from bucket")
-			log.SetLevel(log.ErrorLevel)
+			if loglevel != log.DebugLevel {
+				log.SetLevel(log.ErrorLevel)
+			}
+
 			if err := svc.SyncFromBucket(); err != nil {
 				log.WithField("component", "periodicsync").Errorf("failed to sync from bucket: %s", err.Error())
 			}
-			log.SetLevel(log.InfoLevel)
+			log.SetLevel(loglevel)
 			lastSync = time.Now()
 		}
 		time.Sleep(500 * time.Millisecond)
@@ -301,8 +320,10 @@ func (svc *Syncer) SyncFromBucket() error {
 	isRecursive := true
 	objectCh := svc.Client.ListObjects(svc.BucketName, svc.BucketPath, isRecursive, doneCh)
 
+	objcounter := 0
 	for object := range objectCh {
-		log.WithField("component", "remote").Debugf("object: %#v", object)
+		needSync := false
+		log.WithField("component", "remote").Tracef("object: %#v", object)
 		if object.Err != nil {
 			return object.Err
 		}
@@ -311,11 +332,37 @@ func (svc *Syncer) SyncFromBucket() error {
 		if err != nil {
 			log.WithField("component", "local").Error(err.Error())
 		}
+		info, _ := svc.Client.StatObject(svc.BucketName, object.Key, minio.StatObjectOptions{})
+		localobject, err := os.Stat(svc.LocalPath + "/" + object.Key)
 
-		log.WithField("component", "remote").Infof("get object %s", object.Key)
-		err = svc.getFromBucket(object.Key)
+		if os.IsNotExist(err) {
+			needSync = true
+		}
+
+		if err == nil {
+			if info.LastModified.UTC().After(localobject.ModTime().UTC()) {
+				needSync = true
+			}
+		}
+
+		if needSync {
+			log.WithField("component", "remote").Infof("object needs sync: %s", object.Key)
+			log.WithField("component", "remote").Infof("get object %s", object.Key)
+			err = svc.getFromBucket(object.Key)
+			if err != nil {
+				log.WithField("component", "remote").Error(err.Error())
+			}
+			objcounter = objcounter + 1
+		} else {
+			log.WithField("component", "remote").Debugf("object is in sync: %s", object.Key)
+		}
+
+	}
+
+	if objcounter > 0 {
+		err := svc.triggerWebhook()
 		if err != nil {
-			log.WithField("component", "remote").Error(err.Error())
+			return err
 		}
 	}
 
@@ -353,11 +400,6 @@ func (svc *Syncer) handleSync(c *gin.Context) {
 	err := svc.SyncFromBucket()
 	if err != nil {
 		c.String(http.StatusInternalServerError, "Failed to sync files from bucket: %s", err.Error())
-		return
-	}
-	err = svc.triggerWebhook()
-	if err != nil {
-		c.String(http.StatusInternalServerError, "Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
 		return
 	}
 	c.String(http.StatusOK, "Files are synced.")
