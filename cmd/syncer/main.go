@@ -62,34 +62,40 @@ func main() {
 
 	app := kingpin.New("syncer", "Transfer files from and to S3 buckets and trigger a webhook.")
 	app.Version(fmt.Sprintf("syncer %s-%s %s", appversion, gitcommit, buildtime))
-	app.Flag("basepath", "Base path for the webapp.").Short('b').Default("/sync").Envar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
-	app.Flag("storepath", "Path where files are sync to locally.").Short('s').Default("/data").Envar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
-	app.Flag("staticmap", "Mapping of url-path to local-path used to be served as a dirlisting").Default("-").Envar("SYNCER_STATICMAP").StringVar(&svc.StaticMap)
+	app.Flag("web.root", "Base path for the webapp.").Short('b').Default("/sync").Envar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
+	app.Flag("fs.localpath", "Path where files are sync to locally.").Short('s').Default("/data").Envar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
 	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").Envar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
 	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").Envar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
 	app.Flag("presynccmd", "Command to be executed before the files are uploaded").Short('p').Default("").Envar("SYNCER_PRESYNCCMD").StringVar(&svc.PreSyncCmdString)
-	app.Flag("listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").Envar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
-	app.Flag("bucketname", "Name of the S3 bucket").Default("-").Envar("SYNCER_BUCKETNAME").StringVar(&svc.BucketName)
-	app.Flag("bucketurl", "URL of the S3 bucket").Default("-").Envar("SYNCER_BUCKETURL").StringVar(&svc.BucketURL)
-	app.Flag("bucketkey", "Access key of the S3 bucket").Default("-").Envar("SYNCER_BUCKETKEY").StringVar(&svc.BucketKey)
-	app.Flag("bucketsecret", "Secret of the S3 bucket").Default("-").Envar("SYNCER_BUCKETSECRET").StringVar(&svc.BucketSecret)
-	app.Flag("bucketlocation", "Location of the S3 bucket").Default("-").Envar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
-	app.Flag("bucketpath", "path inside the bucket").Default("").Envar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
+	app.Flag("web.listenaddress", "Address for syncer to listen on.").Short('l').Default("0.0.0.0:8080").Envar("SYNCER_LISTENADDRESS").StringVar(&svc.ListenAddress)
+	app.Flag("bucket.name", "Name of the S3 bucket").Default("-").Envar("SYNCER_BUCKETNAME").StringVar(&svc.BucketName)
+	app.Flag("bucket.url", "URL of the S3 bucket").Default("-").Envar("SYNCER_BUCKETURL").StringVar(&svc.BucketURL)
+	app.Flag("bucket.key", "Access key of the S3 bucket").Default("-").Envar("SYNCER_BUCKETKEY").StringVar(&svc.BucketKey)
+	app.Flag("bucket.secret", "Secret of the S3 bucket").Default("-").Envar("SYNCER_BUCKETSECRET").StringVar(&svc.BucketSecret)
+	app.Flag("bucket.location", "Location of the S3 bucket").Default("-").Envar("SYNCER_BUCKETLOCATION").StringVar(&svc.BucketLocation)
+	app.Flag("bucket.path", "path inside the bucket").Default("").Envar("SYNCER_BUCKETPATH").StringVar(&svc.BucketPath)
 	app.Flag("pullinterval", "Interval in seconds to check and sync updates on the s3 endpoint").Default("30s").Envar("SYNCER_PULLINTERVAL").StringVar(&svc.PullIntervalString)
-	app.Flag("tempdir", "Temp dir where files are store for the presynccmd to run on.").Default("/tmp").Envar("SYNCER_TEMPDIR").StringVar(&svc.TempDir)
-	app.Flag("loglevel", "Log level (info,warning,debug,error,trace").Default("info").Envar("SYNCER_LOGLEVEL").StringVar(&svc.LogLevel)
+	app.Flag("fs.tempdir", "Temp dir where files are store for the presynccmd to run on.").Default("/tmp").Envar("SYNCER_TEMPDIR").StringVar(&svc.TempDir)
+	app.Flag("loglevel", "Log level (info,warning,debug,error,trace)").Default("info").Envar("SYNCER_LOGLEVEL").StringVar(&svc.LogLevel)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
 	log.SetFormatter(&nested.Formatter{
 		HideKeys:        true,
 		FieldsOrder:     []string{"component", "category"},
 		TimestampFormat: time.RFC3339Nano,
+		NoColors:        true,
 	})
 
 	log.WithField("component", "main").Infof("==== Server startup ====")
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
 	log.WithField("component", "main").Infof("gitcommit:  %s", gitcommit)
 	log.WithField("component", "main").Infof("buildtime:  %s", buildtime)
+
+	err := svc.Init()
+	if err != nil {
+		log.Println(err.Error())
+		os.Exit(1)
+	}
 
 	fields := reflect.TypeOf(*svc)
 	values := reflect.ValueOf(*svc)
@@ -107,11 +113,6 @@ func main() {
 		log.WithField("component", "config").Infof("%s:  %v", field.Name, value)
 	}
 
-	err := svc.Init()
-	if err != nil {
-		log.Println(err.Error())
-		os.Exit(1)
-	}
 	switch svc.LogLevel {
 	case "info":
 		log.SetLevel(log.InfoLevel)
@@ -148,21 +149,6 @@ func main() {
 	sync.GET("/*filename", svc.handleDownload)
 	sync.POST("", svc.handleSync)
 	router.StaticFS("/objects", gin.Dir(svc.LocalPath, true))
-
-	if strings.Contains(svc.StaticMap, ":") {
-		parts := strings.SplitN(svc.StaticMap, ":", 2)
-		if len(parts) == 2 {
-			urlpath := parts[0]
-			localpath := parts[1]
-			if len(urlpath) < 1 || len(localpath) < 1 {
-				log.WithField("component", "main").Fatal("bad mapping for staticFS")
-			}
-
-			staticfs := router.StaticFS(urlpath, gin.Dir(localpath, false))
-			staticfs.Use(GinLogger())
-			log.WithField("component", "main").Infof("serving %q as staticFS from %q", urlpath, localpath)
-		}
-	}
 
 	srv := &http.Server{
 		Addr:    svc.ListenAddress,
@@ -252,7 +238,7 @@ func (svc *Syncer) PrediodicSync(interval time.Duration) {
 	loglevel := log.GetLevel()
 	for {
 		if time.Since(lastSync) > interval {
-			log.WithField("component", "periodicsync").Infof("sync from bucket")
+			log.WithField("component", "periodicsync").Debugf("sync from bucket")
 			if loglevel != log.DebugLevel {
 				log.SetLevel(log.ErrorLevel)
 			}
@@ -285,15 +271,18 @@ func (svc *Syncer) createFolder(objectKey string) error {
 	return nil
 }
 
-func (svc *Syncer) getFromBucket(objectKey string) error {
-	log.WithField("component", "remote").Infof("storing %q to %q", objectKey, svc.LocalPath+"/"+objectKey)
-	if err := svc.createFolder(objectKey); err != nil {
+func (svc *Syncer) getFromBucket(bucketObjectKey string) error {
+
+	localObjectName := strings.TrimPrefix(bucketObjectKey, svc.BucketPath+"/")
+
+	if err := svc.createFolder(localObjectName); err != nil {
 		return err
 	}
 
-	err := svc.Client.FGetObject(svc.BucketName, objectKey, svc.LocalPath+"/"+objectKey, minio.GetObjectOptions{})
+	log.WithField("component", "remote").Infof("storing %q to %q", bucketObjectKey, svc.LocalPath+"/"+localObjectName)
+	err := svc.Client.FGetObject(svc.BucketName, bucketObjectKey, svc.LocalPath+"/"+localObjectName, minio.GetObjectOptions{})
 	if err != nil {
-		return fmt.Errorf("Failed to download object %s: %s", objectKey, err.Error())
+		return fmt.Errorf("Failed to download object %s: %s", bucketObjectKey, err.Error())
 	}
 	return nil
 }
@@ -328,12 +317,9 @@ func (svc *Syncer) SyncFromBucket() error {
 			return object.Err
 		}
 
-		err := svc.createFolder(object.Key)
-		if err != nil {
-			log.WithField("component", "local").Error(err.Error())
-		}
+		localObjectName := strings.TrimPrefix(object.Key, svc.BucketPath+"/")
 		info, _ := svc.Client.StatObject(svc.BucketName, object.Key, minio.StatObjectOptions{})
-		localobject, err := os.Stat(svc.LocalPath + "/" + object.Key)
+		localobject, err := os.Stat(svc.LocalPath + "/" + localObjectName)
 
 		if os.IsNotExist(err) {
 			needSync = true
@@ -498,19 +484,13 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		return
 	}
 
-	log.WithField("component", "remote").Debugf("get object %s", dirname+filename)
-	err = svc.getFromBucket(dirname + filename)
-	if err != nil {
+	if err := svc.SyncFromBucket(); err != nil {
+		log.WithField("component", "local").Errorf("failed to sync from bucket: %s", err.Error())
 		c.String(500, "Error sync back from bucket: %s", err.Error())
 		return
+
 	}
 
-	err = svc.triggerWebhook()
-	if err != nil {
-
-		c.String(http.StatusInternalServerError, "Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
-		return
-	}
 	c.String(http.StatusCreated, fmt.Sprintf("Created: %s", filename))
 }
 
@@ -523,14 +503,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		return
 	}
 
-	localdirname := ""
-	if len(svc.BucketPath) > 0 {
-		localdirname = svc.LocalPath + "/" + svc.BucketPath
-	} else {
-		localdirname = svc.LocalPath
-	}
-
-	info, err := os.Stat(localdirname + "/" + filename)
+	info, err := os.Stat(svc.LocalPath + "/" + filename)
 	if err != nil && os.IsNotExist(err) {
 		msg := fmt.Sprintf("The file %s does not exist.", filename)
 		log.WithField("component", "local").Error(msg)
@@ -538,7 +511,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		return
 	}
 	log.WithField("component", "local").Infof("removing local file: %s", filename)
-	err = os.RemoveAll(localdirname + "/" + filename)
+	err = os.RemoveAll(svc.LocalPath + "/" + filename)
 	if err != nil {
 		msg := fmt.Sprintf("Failed delete file %s: %s", filename, err.Error())
 		log.WithField("component", "local").Error(msg)
