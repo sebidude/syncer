@@ -36,6 +36,7 @@ var (
 type Syncer struct {
 	BasePath           string
 	LocalPath          string
+	PurgeMissing       bool
 	StaticMap          string
 	WebhookURL         string
 	WebhookMethod      string
@@ -64,6 +65,7 @@ func main() {
 	app.Version(fmt.Sprintf("syncer %s-%s %s", appversion, gitcommit, buildtime))
 	app.Flag("web.root", "Base path for the webapp.").Short('b').Default("/sync").Envar("SYNCER_BASEPATH").StringVar(&svc.BasePath)
 	app.Flag("fs.localpath", "Path where files are sync to locally.").Short('s').Default("/data").Envar("SYNCER_LOCALPATH").StringVar(&svc.LocalPath)
+	app.Flag("fs.purge.missing", "Remove local files which are not present on the bucket.").Envar("SYNCER_PURGEMISSING").BoolVar(&svc.PurgeMissing)
 	app.Flag("webhookurl", "Url to be triggered after files are updated.").Short('u').Default("").Envar("SYNCER_WEBHOOKURL").StringVar(&svc.WebhookURL)
 	app.Flag("webhookmethod", "http method to be used when triggering the webhook").Short('m').Default("POST").Envar("SYNCER_WEBHOOKMETHOD").StringVar(&svc.WebhookMethod)
 	app.Flag("presynccmd", "Command to be executed before the files are uploaded").Short('p').Default("").Envar("SYNCER_PRESYNCCMD").StringVar(&svc.PreSyncCmdString)
@@ -79,12 +81,27 @@ func main() {
 	app.Flag("loglevel", "Log level (info,warning,debug,error,trace)").Default("info").Envar("SYNCER_LOGLEVEL").StringVar(&svc.LogLevel)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
+	log.SetReportCaller(true)
+
 	log.SetFormatter(&nested.Formatter{
 		HideKeys:        true,
 		FieldsOrder:     []string{"component", "category"},
 		TimestampFormat: time.RFC3339Nano,
 		NoColors:        true,
 	})
+
+	switch svc.LogLevel {
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	case "warning":
+		log.SetLevel(log.WarnLevel)
+	case "debug":
+		log.SetLevel(log.DebugLevel)
+	case "trace":
+		log.SetLevel(log.TraceLevel)
+	}
 
 	log.WithField("component", "main").Infof("==== Server startup ====")
 	log.WithField("component", "main").Infof("appversion: %s", appversion)
@@ -111,19 +128,6 @@ func main() {
 			continue
 		}
 		log.WithField("component", "config").Infof("%s:  %v", field.Name, value)
-	}
-
-	switch svc.LogLevel {
-	case "info":
-		log.SetLevel(log.InfoLevel)
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-	case "warning":
-		log.SetLevel(log.WarnLevel)
-	case "debug":
-		log.SetLevel(log.DebugLevel)
-	case "trace":
-		log.SetLevel(log.TraceLevel)
 	}
 
 	if err := svc.SyncFromBucket(); err != nil {
@@ -309,6 +313,7 @@ func (svc *Syncer) SyncFromBucket() error {
 	isRecursive := true
 	objectCh := svc.Client.ListObjects(svc.BucketName, svc.BucketPath, isRecursive, doneCh)
 
+	// check the remove objects against the local file
 	objcounter := 0
 	for object := range objectCh {
 		needSync := false
@@ -345,6 +350,42 @@ func (svc *Syncer) SyncFromBucket() error {
 
 	}
 
+	// check if the local files exist in the bucket
+	err := filepath.Walk(svc.LocalPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		remoteObjectName := strings.TrimPrefix(path, svc.LocalPath+"/")
+		remoteObject, err := svc.Client.StatObject(svc.BucketName, svc.BucketPath+"/"+remoteObjectName, minio.StatObjectOptions{})
+		log.WithField("component", "local").Debugf("check local object for existence in bucket: %s <-> %s", remoteObjectName, remoteObject.Key)
+		if err != nil {
+			if minioErr, ok := err.(minio.ErrorResponse); ok {
+				if minioErr.StatusCode == 404 {
+					log.WithField("component", "local").Infof("remote object does not exist: %s", remoteObjectName)
+					if svc.PurgeMissing {
+						log.WithField("component", "local").Infof("removing object: %s", path)
+						if removeErr := os.Remove(path); removeErr != nil {
+							log.WithField("component", "local").Errorf("failed to remove object %s: %s", path, removeErr.Error())
+							return nil
+						}
+						objcounter = objcounter + 1
+					}
+					return nil
+				}
+			}
+			log.WithField("component", "local").Errorf("checking remote object error: %s", err.Error())
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.WithField("component", "local").Errorf("Walking local data dir error: %s", err.Error())
+	}
+
 	if objcounter > 0 {
 		err := svc.triggerWebhook()
 		if err != nil {
@@ -363,6 +404,7 @@ func (svc *Syncer) handleDownload(c *gin.Context) {
 	if err != nil {
 		log.WithField("component", "remote").Error(err.Error())
 		c.String(http.StatusNotFound, err.Error())
+		c.Abort()
 		return
 	}
 
@@ -370,6 +412,7 @@ func (svc *Syncer) handleDownload(c *gin.Context) {
 	if err != nil {
 		log.WithField("component", "local").Error(err.Error())
 		c.String(http.StatusInternalServerError, err.Error())
+		c.Abort()
 		return
 	}
 
@@ -378,6 +421,7 @@ func (svc *Syncer) handleDownload(c *gin.Context) {
 	if err != nil {
 		log.WithField("component", "remote").Error(err.Error())
 		c.String(http.StatusInternalServerError, err.Error())
+		c.Abort()
 		return
 	}
 }
@@ -386,6 +430,7 @@ func (svc *Syncer) handleSync(c *gin.Context) {
 	err := svc.SyncFromBucket()
 	if err != nil {
 		c.String(http.StatusInternalServerError, "Failed to sync files from bucket: %s", err.Error())
+		c.Abort()
 		return
 	}
 	c.String(http.StatusOK, "Files are synced.")
@@ -404,6 +449,7 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		msg := fmt.Sprintf("Failed to read bytes from body: %s: %s", dirname+filename, err.Error())
 		log.WithField("component", "local").Error(msg)
 		c.String(500, msg)
+		c.Abort()
 		return
 	}
 	r := bytes.NewReader(filecontent)
@@ -475,18 +521,21 @@ func (svc *Syncer) handleUpload(c *gin.Context) {
 		msg := fmt.Sprintf("Failed to save file %s: %s", dirname+filename, err.Error())
 		log.WithField("component", "remote").Error(msg)
 		c.String(500, msg)
+		c.Abort()
 		return
 	}
 
 	if count != c.Request.ContentLength {
 		log.WithField("component", "remote").Errorf("Written bytes are not equal: read: %d wrote: %d", count, c.Request.ContentLength)
 		c.String(500, "Error in file transmission")
+		c.Abort()
 		return
 	}
 
 	if err := svc.SyncFromBucket(); err != nil {
 		log.WithField("component", "local").Errorf("failed to sync from bucket: %s", err.Error())
 		c.String(500, "Error sync back from bucket: %s", err.Error())
+		c.Abort()
 		return
 
 	}
@@ -500,6 +549,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		msg := fmt.Sprintf("This is not allowed. Go away.")
 		log.WithField("component", "local").Error(msg)
 		c.String(http.StatusForbidden, msg)
+		c.Abort()
 		return
 	}
 
@@ -508,6 +558,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		msg := fmt.Sprintf("The file %s does not exist.", filename)
 		log.WithField("component", "local").Error(msg)
 		c.String(404, msg)
+		c.Abort()
 		return
 	}
 	log.WithField("component", "local").Infof("removing local file: %s", filename)
@@ -516,6 +567,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 		msg := fmt.Sprintf("Failed delete file %s: %s", filename, err.Error())
 		log.WithField("component", "local").Error(msg)
 		c.String(http.StatusInternalServerError, msg)
+		c.Abort()
 		return
 	}
 
@@ -534,6 +586,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 				msg := fmt.Sprintf("Failed to remove file from bucket %s: %s", o, err.Error())
 				log.WithField("component", "remote").Error(msg)
 				c.String(http.StatusInternalServerError, msg)
+				c.Abort()
 				return
 			}
 			log.WithField("component", "remote").Infof("removed object from bucket: %s", o)
@@ -554,6 +607,7 @@ func (svc *Syncer) handleDelete(c *gin.Context) {
 	err = svc.triggerWebhook()
 	if err != nil {
 		c.String(http.StatusInternalServerError, "Failed to trigger webhook: %s %s", svc.WebhookMethod, svc.WebhookURL)
+		c.Abort()
 		return
 	}
 	c.String(http.StatusOK, fmt.Sprintf("Deleted: %s", filename))
