@@ -4,7 +4,6 @@ go 1.16
 
 require (
 	github.com/alecthomas/units v0.0.0-20210912230133-d1bdfacee922 // indirect
-	github.com/antonfisher/nested-logrus-formatter v1.3.1
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/gin-gonic/gin v1.7.4
 	github.com/go-ini/ini v1.63.2 // indirect
@@ -21,7 +20,7 @@ require (
 	github.com/ugorji/go v1.2.6 // indirect
 	golang.org/x/crypto v0.0.0-20210920023735-84f357641f63 // indirect
 	golang.org/x/net v0.0.0-20210917221730-978cfadd31cf // indirect
-	golang.org/x/sys v0.0.0-20210917161153-d61c044b1678 // indirect
+	golang.org/x/sys v0.0.0-20210921065528-437939a70204 // indirect
 	golang.org/x/text v0.3.7 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6

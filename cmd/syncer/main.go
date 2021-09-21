@@ -19,7 +19,6 @@ import (
 
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 
-	nested "github.com/antonfisher/nested-logrus-formatter"
 	"github.com/gin-gonic/gin"
 	minio "github.com/minio/minio-go"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -81,14 +80,9 @@ func main() {
 	app.Flag("loglevel", "Log level (info,warning,debug,error,trace)").Default("info").Envar("SYNCER_LOGLEVEL").StringVar(&svc.LogLevel)
 	kingpin.MustParse(app.Parse(os.Args[1:]))
 
-	log.SetReportCaller(true)
+	log.SetReportCaller(false)
 
-	log.SetFormatter(&nested.Formatter{
-		HideKeys:        true,
-		FieldsOrder:     []string{"component", "category"},
-		TimestampFormat: time.RFC3339Nano,
-		NoColors:        true,
-	})
+	log.SetFormatter(&log.JSONFormatter{})
 
 	switch svc.LogLevel {
 	case "info":
