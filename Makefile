@@ -1,3 +1,6 @@
+.PHONY: all test clean
+.ONESHELL:
+
 APPNAME := syncer
 APPSRC := ./cmd/$(APPNAME)
 
@@ -40,3 +43,10 @@ install:
 image: 
 	@echo Creating docker image
 	@docker build -t $(APPNAME):latest -t $(APPNAME):$(VERSIONTAG)-$(GITCOMMITHASH) .
+
+tarball:
+	@echo Creating tarball
+	@cd build/linux
+	@tar cvfz syncer-$(VERSIONTAG).linux-amd64.tar.gz syncer
+	@sha256sum syncer-$(VERSIONTAG).linux-amd64.tar.gz > syncer-$(VERSIONTAG).linux-amd64.tar.gz.sha256
+
