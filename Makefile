@@ -47,6 +47,8 @@ image:
 tarball:
 	@echo Creating tarball
 	@cd build/linux
-	@tar cvfz syncer-$(VERSIONTAG).linux-amd64.tar.gz syncer
-	@sha256sum syncer-$(VERSIONTAG).linux-amd64.tar.gz > syncer-$(VERSIONTAG).linux-amd64.tar.gz.sha256
+	@mkdir -p syncer-$(VERSIONTAG).linux-amd64
+	@cp syncer syncer-$(VERSIONTAG).linux-amd64/
+	@tar cvfz syncer-$(VERSIONTAG).linux-amd64.tar.gz syncer-$(VERSIONTAG).linux-amd64
+	@sha256sum syncer-$(VERSIONTAG).linux-amd64.tar.gz > syncer-$(VERSIONTAG).linux-amd64/syncer-$(VERSIONTAG).linux-amd64.tar.gz.sha256
 
