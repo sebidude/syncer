@@ -1,0 +1,18 @@
+[Unit]
+Description=Syncer for S3 buckets
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/sysconfig/syncer.env
+User=prometheus
+Group=prometheus
+Type=simple
+Restart=on-failure
+WorkingDirectory=/etc/prometheus
+ExecStart=/usr/local/bin/syncer 
+LimitNOFILE=10000
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target
